@@ -66,14 +66,50 @@ the boundary around an unreliable component."
 - Function calling, not RAG, not prompt-stuffing. The model is given *descriptions* of 7 Python
   functions (name, purpose, parameters) — not the data itself. Given a question, it can request
   zero, one, or several of them, in up to 5 rounds, before producing a final answer.
-- Why not just paste the seller's data into the prompt? Two reasons worth stating: (1) it doesn't
-  scale — a seller with 10,000 orders can't fit in a context window; (2) it removes the
-  application's ability to control *what* the model is allowed to see or do per request. Function
-  calling keeps the database access path identical to a normal API call — same filters, same
-  authorization — the LLM just decides *which* call to make.
 - Drafting a buyer reply is the one place the model *writes*: it always sets `status = "drafted"`,
   never `"approved"`. That transition is a separate authenticated endpoint the seller must call by
   clicking Approve in the UI — the model has no code path that can reach it.
+
+#### Why function calling, and not the alternatives
+
+A strong answer to "why did you choose this approach" names the options you *didn't* pick and
+says specifically why each loses for this use case — not just "it works well."
+
+- **No tools, ask the model directly.** It has never seen the database, so it either refuses or
+  invents a plausible-sounding number. Unacceptable for real business data — a seller acting on
+  "you have 3 pending orders" needs that number to be real, not fluent.
+
+- **Prompt-stuffing** (paste the seller's raw data into the prompt as context). Looks simpler,
+  breaks down fast: doesn't scale — a seller with thousands of orders blows the context window,
+  and you pay for those tokens on *every* turn regardless of what was actually asked. You also
+  still have to write the "fetch only this seller's data" logic to build that blob in the first
+  place, so you get all the engineering cost of scoping with none of the benefit — it's baked into
+  every prompt instead of living behind a controlled interface. And there's no constrained action
+  space: if the model sees everything as free-form context, enforcing "you may only ever set
+  status to `drafted`, never `approved`" is much harder than over a typed function it can only
+  call one specific way.
+
+- **RAG (retrieval over embeddings).** The wrong tool for this job, and it's worth being precise
+  about why: RAG finds the passage most *semantically similar* to a query — excellent for
+  unstructured text like a policy doc or FAQ. It does not compute
+  `SUM(quantity) WHERE status = 'pending'`. Structured, exact, aggregate data needs a real query
+  engine underneath regardless of whether an LLM is involved — RAG doesn't replace SQL, it answers
+  a different kind of question. (This *is* the right tool for a stretch feature like "seller
+  policy & FAQ" — searching uploaded documents — which is a genuinely different problem from "what
+  are my pending orders.")
+
+- **Function calling (what's built here).** The model requests a specific, developer-defined,
+  typed operation — `get_orders(status="pending")` — and the backend runs real code: a real SQL
+  filter, a real JWT-derived `seller_id`, real auth. The model only ever narrates the result. This
+  gets you correctness (every number traces to an actual row, never invented), a hard action
+  boundary (the 7 functions *are* the model's entire action space — nothing outside that whitelist
+  is reachable no matter how it's prompted), scoping that stays in normal application code instead
+  of something the LLM has to be trusted with, and efficiency (only the data relevant to *this*
+  question gets fetched, not the seller's entire history every turn).
+
+The one-line version, if put on the spot: **RAG retrieves relevant text; function calling executes
+real, authorized code.** This project's questions ("what's pending," "what's my revenue") need the
+second one.
 
 ### Frontend
 - Next.js App Router with a route group (`(app)/`) so the sidebar/topbar/AI-panel shell wraps
